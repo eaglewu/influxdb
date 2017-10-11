@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"context"
+
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/query"
 	"github.com/uber-go/zap"
@@ -509,10 +511,10 @@ func (f *FileStore) TSMReader(path string) *TSMReader {
 }
 
 // KeyCursor returns a KeyCursor for key and t across the files in the FileStore.
-func (f *FileStore) KeyCursor(key []byte, t int64, ascending bool) *KeyCursor {
+func (f *FileStore) KeyCursor(ctx context.Context, key []byte, t int64, ascending bool) *KeyCursor {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	return newKeyCursor(f, key, t, ascending)
+	return newKeyCursor(ctx, f, key, t, ascending)
 }
 
 // Stats returns the stats of the underlying files, preferring the cached version if it is still valid.
@@ -952,6 +954,8 @@ type KeyCursor struct {
 	current []*location
 	buf     []Value
 
+	ctx context.Context
+
 	// pos is the index within seeks.  Based on ascending, it will increment or
 	// decrement through the size of seeks slice.
 	pos       int
@@ -1011,10 +1015,11 @@ func (a ascLocations) Less(i, j int) bool {
 
 // newKeyCursor returns a new instance of KeyCursor.
 // This function assumes the read-lock has been taken.
-func newKeyCursor(fs *FileStore, key []byte, t int64, ascending bool) *KeyCursor {
+func newKeyCursor(ctx context.Context, fs *FileStore, key []byte, t int64, ascending bool) *KeyCursor {
 	c := &KeyCursor{
 		key:       key,
 		seeks:     fs.locations(key, t, ascending),
+		ctx:       ctx,
 		ascending: ascending,
 	}
 

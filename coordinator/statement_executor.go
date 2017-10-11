@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -56,7 +57,7 @@ type StatementExecutor struct {
 func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx query.ExecutionContext) error {
 	// Select statements are handled separately so that they can be streamed.
 	if stmt, ok := stmt.(*influxql.SelectStatement); ok {
-		return e.executeSelectStatement(stmt, &ctx)
+		return e.executeSelectStatement(context.TODO(), stmt, &ctx)
 	}
 
 	var rows models.Rows
@@ -469,14 +470,14 @@ func (e *StatementExecutor) executeSetPasswordUserStatement(q *influxql.SetPassw
 	return e.MetaClient.UpdateUser(q.Name, q.Password)
 }
 
-func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatement, ctx *query.ExecutionContext) error {
-	itrs, columns, err := e.createIterators(stmt, ctx)
+func (e *StatementExecutor) executeSelectStatement(ctx context.Context, stmt *influxql.SelectStatement, ectx *query.ExecutionContext) error {
+	itrs, columns, err := e.createIterators(ctx, stmt, ectx)
 	if err != nil {
 		return err
 	}
 
 	// Generate a row emitter from the iterator set.
-	em := query.NewEmitter(itrs, stmt.TimeAscending(), ctx.ChunkSize)
+	em := query.NewEmitter(itrs, stmt.TimeAscending(), ectx.ChunkSize)
 	em.Columns = columns
 	if stmt.Location != nil {
 		em.Location = stmt.Location
@@ -501,7 +502,7 @@ func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatemen
 		} else if row == nil {
 			// Check if the query was interrupted while emitting.
 			select {
-			case <-ctx.InterruptCh:
+			case <-ectx.InterruptCh:
 				return query.ErrQueryInterrupted
 			default:
 			}
@@ -518,13 +519,13 @@ func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatemen
 		}
 
 		result := &query.Result{
-			StatementID: ctx.StatementID,
+			StatementID: ectx.StatementID,
 			Series:      []*models.Row{row},
 			Partial:     partial,
 		}
 
 		// Send results or exit if closing.
-		if err := ctx.Send(result); err != nil {
+		if err := ectx.Send(result); err != nil {
 			return err
 		}
 
@@ -538,12 +539,12 @@ func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatemen
 		}
 
 		var messages []*query.Message
-		if ctx.ReadOnly {
+		if ectx.ReadOnly {
 			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
 		}
 
-		return ctx.Send(&query.Result{
-			StatementID: ctx.StatementID,
+		return ectx.Send(&query.Result{
+			StatementID: ectx.StatementID,
 			Messages:    messages,
 			Series: []*models.Row{{
 				Name:    "result",
@@ -555,8 +556,8 @@ func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatemen
 
 	// Always emit at least one result.
 	if !emitted {
-		return ctx.Send(&query.Result{
-			StatementID: ctx.StatementID,
+		return ectx.Send(&query.Result{
+			StatementID: ectx.StatementID,
 			Series:      make([]*models.Row, 0),
 		})
 	}
@@ -564,24 +565,24 @@ func (e *StatementExecutor) executeSelectStatement(stmt *influxql.SelectStatemen
 	return nil
 }
 
-func (e *StatementExecutor) createIterators(stmt *influxql.SelectStatement, ctx *query.ExecutionContext) ([]query.Iterator, []string, error) {
+func (e *StatementExecutor) createIterators(ctx context.Context, stmt *influxql.SelectStatement, ectx *query.ExecutionContext) ([]query.Iterator, []string, error) {
 	opt := query.SelectOptions{
-		InterruptCh: ctx.InterruptCh,
-		NodeID:      ctx.ExecutionOptions.NodeID,
+		InterruptCh: ectx.InterruptCh,
+		NodeID:      ectx.ExecutionOptions.NodeID,
 		MaxSeriesN:  e.MaxSelectSeriesN,
 		MaxBucketsN: e.MaxSelectBucketsN,
-		Authorizer:  ctx.Authorizer,
+		Authorizer:  ectx.Authorizer,
 	}
 
 	// Create a set of iterators from a selection.
-	itrs, columns, err := query.Select(stmt, e.ShardMapper, opt)
+	itrs, columns, err := query.Select(ctx, stmt, e.ShardMapper, opt)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if e.MaxSelectPointN > 0 {
 		monitor := query.PointLimitMonitor(itrs, query.DefaultStatsInterval, e.MaxSelectPointN)
-		ctx.Query.Monitor(monitor)
+		ectx.Query.Monitor(monitor)
 	}
 	return itrs, columns, nil
 }

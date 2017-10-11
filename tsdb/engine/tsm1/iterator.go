@@ -3,6 +3,8 @@ package tsm1
 import (
 	"fmt"
 
+	"context"
+
 	"github.com/influxdata/influxdb/query"
 	"github.com/influxdata/influxdb/tsdb"
 	"github.com/uber-go/zap"
@@ -153,7 +155,7 @@ func (c cursorsAt) close() {
 // newMergeFinalizerIterator creates a new Merge iterator from the inputs. If the call to Merge succeeds,
 // the resulting Iterator will be wrapped in a finalizer iterator.
 // If Merge returns an error, the inputs will be closed.
-func newMergeFinalizerIterator(inputs []query.Iterator, opt query.IteratorOptions, log zap.Logger) (query.Iterator, error) {
+func newMergeFinalizerIterator(ctx context.Context, inputs []query.Iterator, opt query.IteratorOptions, log zap.Logger) (query.Iterator, error) {
 	itr, err := query.Iterators(inputs).Merge(opt)
 	if err != nil {
 		query.Iterators(inputs).Close()
