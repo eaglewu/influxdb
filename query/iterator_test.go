@@ -1527,7 +1527,7 @@ func TestIterator_EncodeDecode(t *testing.T) {
 	}
 
 	// Decode from the buffer.
-	dec := query.NewReaderIterator(&buf, influxql.Float, itr.Stats())
+	dec := query.NewReaderIterator(context.TODO(), &buf, influxql.Float, itr.Stats())
 
 	// Initial stats should exist immediately.
 	fdec := dec.(query.FloatIterator)
