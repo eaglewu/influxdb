@@ -17,6 +17,7 @@ import (
 	"context"
 
 	"github.com/influxdata/influxdb/models"
+	"github.com/influxdata/influxdb/pkg/metrics"
 	"github.com/influxdata/influxdb/query"
 	"github.com/uber-go/zap"
 )
@@ -120,6 +121,19 @@ type TSMFile interface {
 const (
 	statFileStoreBytes = "diskBytes"
 	statFileStoreCount = "numFiles"
+)
+
+var (
+	floatBlocksDecodedCounter    = metrics.MustRegisterCounter("float_blocks_decoded", metrics.WithGroup(tsmGroup))
+	floatBlocksSizeCounter       = metrics.MustRegisterCounter("float_blocks_size_bytes", metrics.WithGroup(tsmGroup))
+	integerBlocksDecodedCounter  = metrics.MustRegisterCounter("integer_blocks_decoded", metrics.WithGroup(tsmGroup))
+	integerBlocksSizeCounter     = metrics.MustRegisterCounter("integer_blocks_size_bytes", metrics.WithGroup(tsmGroup))
+	unsignedBlocksDecodedCounter = metrics.MustRegisterCounter("unsigned_blocks_decoded", metrics.WithGroup(tsmGroup))
+	unsignedBlocksSizeCounter    = metrics.MustRegisterCounter("unsigned_blocks_size_bytes", metrics.WithGroup(tsmGroup))
+	stringBlocksDecodedCounter   = metrics.MustRegisterCounter("string_blocks_decoded", metrics.WithGroup(tsmGroup))
+	stringBlocksSizeCounter      = metrics.MustRegisterCounter("string_blocks_size_bytes", metrics.WithGroup(tsmGroup))
+	booleanBlocksDecodedCounter  = metrics.MustRegisterCounter("boolean_blocks_decoded", metrics.WithGroup(tsmGroup))
+	booleanBlocksSizeCounter     = metrics.MustRegisterCounter("boolean_blocks_size_bytes", metrics.WithGroup(tsmGroup))
 )
 
 // FileStore is an abstraction around multiple TSM files.
@@ -955,6 +969,7 @@ type KeyCursor struct {
 	buf     []Value
 
 	ctx context.Context
+	col *metrics.Group
 
 	// pos is the index within seeks.  Based on ascending, it will increment or
 	// decrement through the size of seeks slice.
@@ -1020,6 +1035,7 @@ func newKeyCursor(ctx context.Context, fs *FileStore, key []byte, t int64, ascen
 		key:       key,
 		seeks:     fs.locations(key, t, ascending),
 		ctx:       ctx,
+		col:       metrics.GroupFromContext(ctx),
 		ascending: ascending,
 	}
 

@@ -10,6 +10,7 @@ import (
 	"context"
 
 	"github.com/influxdata/influxdb/influxql"
+	"github.com/influxdata/influxdb/pkg/tracing"
 )
 
 // SelectOptions are options that customize the select call.
@@ -112,6 +113,7 @@ func (p *preparedStatement) Close() error {
 }
 
 func buildIterators(ctx context.Context, stmt *influxql.SelectStatement, ic IteratorCreator, opt IteratorOptions) ([]Iterator, error) {
+	span := tracing.SpanFromContext(ctx)
 	// Retrieve refs for each call and var ref.
 	info := newSelectInfo(stmt)
 	if len(info.calls) > 1 && len(info.refs) > 0 {
@@ -127,7 +129,22 @@ func buildIterators(ctx context.Context, stmt *influxql.SelectStatement, ic Iter
 
 	// If there are multiple auxilary fields and no calls then construct an aux iterator.
 	if len(info.calls) == 0 && len(info.refs) > 0 {
+		if span != nil {
+			span = span.StartSpan("auxiliary_iterators")
+			defer span.Finish()
+
+			span.SetLabels("statement", stmt.String())
+			ctx = tracing.NewContextWithSpan(ctx, span)
+		}
 		return buildAuxIterators(ctx, stmt.Fields, ic, stmt.Sources, opt)
+	}
+
+	if span != nil {
+		span = span.StartSpan("field_iterators")
+		defer span.Finish()
+
+		span.SetLabels("statement", stmt.String())
+		ctx = tracing.NewContextWithSpan(ctx, span)
 	}
 
 	// Include auxiliary fields from top() and bottom() when not writing the results.
@@ -191,7 +208,7 @@ func buildAuxIterators(ctx context.Context, fields influxql.Fields, ic IteratorC
 					stmt: source.Statement,
 				}
 
-				input, err := b.buildAuxIterator(opt)
+				input, err := b.buildAuxIterator(ctx, opt)
 				if err != nil {
 					return err
 				}
@@ -309,6 +326,7 @@ func buildAuxIterator(expr influxql.Expr, aitr AuxIterator, opt IteratorOptions)
 func buildFieldIterators(ctx context.Context, fields influxql.Fields, ic IteratorCreator, sources influxql.Sources, opt IteratorOptions, selector, writeMode bool) ([]Iterator, error) {
 	// Create iterators from fields against the iterator creator.
 	itrs := make([]Iterator, len(fields))
+	span := tracing.SpanFromContext(ctx)
 
 	if err := func() error {
 		hasAuxFields := false
@@ -323,10 +341,22 @@ func buildFieldIterators(ctx context.Context, fields influxql.Fields, ic Iterato
 				continue
 			}
 
+			var localSpan *tracing.Span
 			localContext := ctx
+
+			if span != nil {
+				localSpan = span.StartSpan("expression")
+				localSpan.SetLabels("expr", f.Expr.String())
+				localContext = tracing.NewContextWithSpan(ctx, localSpan)
+			}
 
 			expr := influxql.Reduce(f.Expr, nil)
 			itr, err := buildExprIterator(localContext, expr, ic, sources, opt, selector, writeMode)
+
+			if localSpan != nil {
+				localSpan.Finish()
+			}
+
 			if err != nil {
 				return err
 			} else if itr == nil {

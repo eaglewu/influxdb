@@ -5,6 +5,8 @@ import (
 
 	"context"
 
+	"github.com/influxdata/influxdb/pkg/metrics"
+	"github.com/influxdata/influxdb/pkg/tracing"
 	"github.com/influxdata/influxdb/query"
 	"github.com/influxdata/influxdb/tsdb"
 	"github.com/uber-go/zap"
@@ -161,7 +163,7 @@ func newMergeFinalizerIterator(ctx context.Context, inputs []query.Iterator, opt
 		query.Iterators(inputs).Close()
 		return nil, err
 	}
-	return newFinalizerIterator(itr, log), nil
+	return newInstrumentedIterator(ctx, newFinalizerIterator(itr, log)), nil
 }
 
 // newFinalizerIterator creates a new iterator that installs a runtime finalizer
@@ -186,5 +188,32 @@ func newFinalizerIterator(itr query.Iterator, log zap.Logger) query.Iterator {
 		return newBooleanFinalizerIterator(inner, log)
 	default:
 		panic(fmt.Sprintf("unsupported finalizer iterator type: %T", itr))
+	}
+}
+
+func newInstrumentedIterator(ctx context.Context, itr query.Iterator) query.Iterator {
+	if itr == nil {
+		return nil
+	}
+
+	span := tracing.SpanFromContext(ctx)
+	grp := metrics.GroupFromContext(ctx)
+	if span == nil || grp == nil {
+		return itr
+	}
+
+	switch inner := itr.(type) {
+	case query.FloatIterator:
+		return newFloatInstrumentedIterator(inner, span, grp)
+	case query.IntegerIterator:
+		return newIntegerInstrumentedIterator(inner, span, grp)
+	case query.UnsignedIterator:
+		return newUnsignedInstrumentedIterator(inner, span, grp)
+	case query.StringIterator:
+		return newStringInstrumentedIterator(inner, span, grp)
+	case query.BooleanIterator:
+		return newBooleanInstrumentedIterator(inner, span, grp)
+	default:
+		panic(fmt.Sprintf("unsupported instrumented iterator type: %T", itr))
 	}
 }

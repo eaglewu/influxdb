@@ -15,6 +15,8 @@ import (
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/monitor"
+	"github.com/influxdata/influxdb/pkg/tracing"
+	"github.com/influxdata/influxdb/pkg/tracing/fields"
 	"github.com/influxdata/influxdb/query"
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxdb/tsdb"
@@ -137,7 +139,11 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement, ctx query.
 		}
 		err = e.executeDropUserStatement(stmt)
 	case *influxql.ExplainStatement:
-		rows, err = e.executeExplainStatement(stmt, &ctx)
+		if stmt.Analyze {
+			rows, err = e.executeExplainAnalyzeStatement(stmt, &ctx)
+		} else {
+			rows, err = e.executeExplainStatement(stmt, &ctx)
+		}
 	case *influxql.GrantStatement:
 		if ctx.ReadOnly {
 			messages = append(messages, query.ReadOnlyWarning(stmt.String()))
@@ -402,17 +408,13 @@ func (e *StatementExecutor) executeDropUserStatement(q *influxql.DropUserStateme
 	return e.MetaClient.DropUser(q.Name)
 }
 
-func (e *StatementExecutor) executeExplainStatement(q *influxql.ExplainStatement, ctx *query.ExecutionContext) (models.Rows, error) {
-	if q.Analyze {
-		return nil, errors.New("analyze is currently unimplemented")
-	}
-
+func (e *StatementExecutor) executeExplainStatement(q *influxql.ExplainStatement, ectx *query.ExecutionContext) (models.Rows, error) {
 	opt := query.SelectOptions{
-		InterruptCh: ctx.InterruptCh,
-		NodeID:      ctx.ExecutionOptions.NodeID,
+		InterruptCh: ectx.InterruptCh,
+		NodeID:      ectx.ExecutionOptions.NodeID,
 		MaxSeriesN:  e.MaxSelectSeriesN,
 		MaxBucketsN: e.MaxSelectBucketsN,
-		Authorizer:  ctx.Authorizer,
+		Authorizer:  ectx.Authorizer,
 	}
 
 	// Prepare the query for execution, but do not actually execute it.
@@ -435,6 +437,74 @@ func (e *StatementExecutor) executeExplainStatement(q *influxql.ExplainStatement
 	for _, s := range strings.Split(plan, "\n") {
 		row.Values = append(row.Values, []interface{}{s})
 	}
+	return models.Rows{row}, nil
+}
+
+func (e *StatementExecutor) executeExplainAnalyzeStatement(q *influxql.ExplainStatement, ectx *query.ExecutionContext) (models.Rows, error) {
+	stmt := q.Statement
+	t, span := tracing.NewTrace("select")
+	ctx := tracing.NewContextWithTrace(context.Background(), t)
+	ctx = tracing.NewContextWithSpan(ctx, span)
+	start := time.Now()
+
+	itrs, columns, err := e.createIterators(ctx, stmt, ectx)
+	if err != nil {
+		return nil, err
+	}
+
+	iterTime := time.Since(start)
+
+	// Generate a row emitter from the iterator set.
+	em := query.NewEmitter(itrs, stmt.TimeAscending(), ectx.ChunkSize)
+	em.Columns = columns
+	if stmt.Location != nil {
+		em.Location = stmt.Location
+	}
+	em.OmitTime = stmt.OmitTime
+	em.EmitName = stmt.EmitName
+
+	// Emit rows to the results channel.
+	var writeN int64
+	for {
+		var row *models.Row
+		row, _, err = em.Emit()
+		if err != nil {
+			goto CLEANUP
+		} else if row == nil {
+			// Check if the query was interrupted while emitting.
+			select {
+			case <-ectx.InterruptCh:
+				err = query.ErrQueryInterrupted
+				goto CLEANUP
+			default:
+			}
+			break
+		}
+
+		writeN += int64(len(row.Values))
+	}
+
+CLEANUP:
+	em.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	totalTime := time.Since(start)
+	span.AddFields(
+		fields.Duration("total_time", totalTime),
+		fields.Duration("planning_time", iterTime),
+		fields.Duration("execution_time", totalTime-iterTime),
+	)
+	span.Finish()
+
+	row := &models.Row{
+		Columns: []string{"EXPLAIN ANALYZE"},
+	}
+	for _, s := range strings.Split(t.Tree().String(), "\n") {
+		row.Values = append(row.Values, []interface{}{s})
+	}
+
 	return models.Rows{row}, nil
 }
 
@@ -1074,8 +1144,8 @@ func (e *StatementExecutor) NormalizeStatement(stmt influxql.Statement, defaultD
 		case *influxql.Measurement:
 			switch stmt.(type) {
 			case *influxql.DropSeriesStatement, *influxql.DeleteSeriesStatement:
-			// DB and RP not supported by these statements so don't rewrite into invalid
-			// statements
+				// DB and RP not supported by these statements so don't rewrite into invalid
+				// statements
 			default:
 				err = e.normalizeMeasurement(node, defaultDatabase)
 			}

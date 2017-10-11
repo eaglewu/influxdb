@@ -18,11 +18,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"strconv"
+
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/pkg/bytesutil"
 	"github.com/influxdata/influxdb/pkg/estimator"
 	"github.com/influxdata/influxdb/pkg/limiter"
+	"github.com/influxdata/influxdb/pkg/metrics"
+	"github.com/influxdata/influxdb/pkg/tracing"
 	"github.com/influxdata/influxdb/query"
 	"github.com/influxdata/influxdb/tsdb"
 	_ "github.com/influxdata/influxdb/tsdb/index"
@@ -46,6 +50,14 @@ var (
 	// Static objects to prevent small allocs.
 	timeBytes              = []byte("time")
 	keyFieldSeparatorBytes = []byte(keyFieldSeparator)
+)
+
+var (
+	tsmGroup                   = metrics.MustRegisterGroup("tsm1")
+	numberOfRefCursorsCounter  = metrics.MustRegisterCounter("cursors_ref", metrics.WithGroup(tsmGroup))
+	numberOfAuxCursorsCounter  = metrics.MustRegisterCounter("cursors_aux", metrics.WithGroup(tsmGroup))
+	numberOfCondCursorsCounter = metrics.MustRegisterCounter("cursors_cond", metrics.WithGroup(tsmGroup))
+	planningTimer              = metrics.MustRegisterTimer("planning_time", metrics.WithGroup(tsmGroup))
 )
 
 const (
@@ -1690,6 +1702,23 @@ func (e *Engine) KeyCursor(ctx context.Context, key []byte, t int64, ascending b
 
 // CreateIterator returns an iterator for the measurement based on opt.
 func (e *Engine) CreateIterator(ctx context.Context, measurement string, opt query.IteratorOptions) (query.Iterator, error) {
+	if span := tracing.SpanFromContext(ctx); span != nil {
+		labels := []string{"shard_id", strconv.Itoa(int(e.id)), "measurement", measurement}
+		if opt.Condition != nil {
+			labels = append(labels, "cond", opt.Condition.String())
+		}
+
+		span = span.StartSpan("create_iterator")
+		span.SetLabels(labels...)
+		ctx = tracing.NewContextWithSpan(ctx, span)
+
+		group := metrics.NewGroup(tsmGroup)
+		ctx = metrics.NewContextWithGroup(ctx, group)
+		start := time.Now()
+
+		defer group.GetTimer(planningTimer).UpdateSince(start)
+	}
+
 	if call, ok := opt.Expr.(*influxql.Call); ok {
 		if opt.Interval.IsZero() {
 			if call.Name == "first" || call.Name == "last" {
@@ -1981,6 +2010,13 @@ func (e *Engine) createVarRefSeriesIterator(ctx context.Context, ref *influxql.V
 	itrOpt := opt
 	itrOpt.Condition = filter
 
+	var curCounter, auxCounter, condCounter *metrics.Counter
+	if col := metrics.GroupFromContext(ctx); col != nil {
+		curCounter = col.GetCounter(numberOfRefCursorsCounter)
+		auxCounter = col.GetCounter(numberOfAuxCursorsCounter)
+		condCounter = col.GetCounter(numberOfCondCursorsCounter)
+	}
+
 	// Build main cursor.
 	var cur cursor
 	if ref != nil {
@@ -1988,6 +2024,9 @@ func (e *Engine) createVarRefSeriesIterator(ctx context.Context, ref *influxql.V
 		// If the field doesn't exist then don't build an iterator.
 		if cur == nil {
 			return nil, nil
+		}
+		if curCounter != nil {
+			curCounter.Add(1)
 		}
 	}
 
@@ -2001,6 +2040,9 @@ func (e *Engine) createVarRefSeriesIterator(ctx context.Context, ref *influxql.V
 			if ref.Type != influxql.Tag {
 				cur := e.buildCursor(ctx, name, seriesKey, tfs, &ref, opt)
 				if cur != nil {
+					if auxCounter != nil {
+						auxCounter.Add(1)
+					}
 					aux[i] = newBufCursor(cur, opt.Ascending)
 					continue
 				}
@@ -2065,6 +2107,9 @@ func (e *Engine) createVarRefSeriesIterator(ctx context.Context, ref *influxql.V
 			if ref.Type != influxql.Tag {
 				cur := e.buildCursor(ctx, name, seriesKey, tfs, &ref, opt)
 				if cur != nil {
+					if condCounter != nil {
+						condCounter.Add(1)
+					}
 					conds[i] = newBufCursor(cur, opt.Ascending)
 					continue
 				}
