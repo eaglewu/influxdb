@@ -408,7 +408,7 @@ func (s *Server) Open() error {
 	}
 	s.TSDBStore.With(s.DiagnosticService.StoreContext())
 	if s.config.Data.QueryLogEnabled {
-		s.QueryExecutor.With(s.DiagnosticService.QueryContext())
+		s.QueryExecutor.WithDiagnosticHandler(s.DiagnosticService.QueryHandler())
 	}
 	s.PointsWriter.With(s.DiagnosticService.PointsWriterContext())
 	s.Subscriber.With(s.DiagnosticService.SubscriberContext())
